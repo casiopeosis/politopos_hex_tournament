@@ -7,11 +7,12 @@ La estrategia implementada en `strategy.py` se llama **`FogBridge_MALIK_RUBEN`**
 - `classic`, con informacion completa
 - `dark`, con fog of war donde solo observamos nuestras propias piedras y las colisiones del rival
 
-La version final se apoyo en tres capas distintas:
+La version final se apoyo en tres capas principales y un ajuste extra por color:
 
 - en `classic`, una combinacion de heuristicas estructurales de Hex + una busqueda tipo **flat root Monte Carlo**
 - en finales de `classic`, un **solver exacto de endgame** para reducir ruido cuando ya quedan pocas casillas
 - en `dark`, una estrategia **mucho mas conservadora**, enfocada en construir cadenas solidas y aprovechar el hecho de que el rival no ve nuestras piedras
+- en `classic`, cuando juega **Blanco**, una evaluacion en **dos etapas** para filtrar candidatas baratas antes de gastar el costo completo de la evaluacion adversarial
 
 La motivacion principal fue construir una estrategia fuerte dentro de las restricciones reales del torneo:
 
@@ -106,6 +107,13 @@ Para cada jugada candidata se mide:
 
 Ese ultimo punto es importante: la estrategia incorpora una **senal explicita de respuesta del oponente**. Es una verificacion corta de 1-ply para evitar jugadas que se ven bien localmente pero colapsan en el siguiente turno.
 
+En el checkpoint final, esta parte quedo asimetrica por color:
+
+- como **Blanco**, la raiz hace primero un filtro barato y luego una evaluacion cara solo sobre un shortlist seguro
+- como **Negro**, se mantuvo la evaluacion cara tradicional sobre todas las candidatas relevantes
+
+Esa decision fue intencional: el `two-stage scoring` ayudo mas a Blanco que a Negro en las pruebas, asi que se dejo activo solo donde aportaba valor neto.
+
 ## 5. Solver exacto de finales
 
 Cuando el tablero ya esta bastante cerrado, los rollouts cortos dejan de ser la mejor herramienta.
@@ -129,11 +137,12 @@ Como Blanco, varias versiones tempranas tendian a:
 - seguir forma local bonita sin cortar el corredor correcto del rival
 - o defender demasiado tarde corredores verticales estrechos
 
-Para corregir eso, la version final agrega tres ideas puntuales en `classic`:
+Para corregir eso, la version final agrega cuatro ideas puntuales en `classic`:
 
 - deteccion explicita de **corredores estrechos** del rival cuando Negro empieza a consolidar una cadena peligrosa
 - penalizacion por **sobrecomprometerse** en una banda horizontal demasiado angosta si la jugada no extiende span ni fusiona grupos
 - una bonificacion de **conversion** muy tardia y muy controlada, que solo entra cuando Blanco ya va claramente por delante y el rival no esta creando una amenaza real
+- un `two-stage scoring` en la raiz: primero filtra candidatas con señales baratas y luego reserva la evaluacion cara para el shortlist
 
 La intencion no fue volver a Blanco agresivo por defecto, sino hacerlo menos ingenuo en medio juego y menos lento para cerrar una ventaja ya ganada.
 
@@ -269,11 +278,17 @@ Tambien se probo una raiz mas parecida a `UCT`, pero no quedo como version final
 - empeoraba la disciplina estructural de Blanco
 - en las mini-series directas contra `MCTS_Tier_2` rindio peor que el root search mas sesgado por heuristica
 
+Tambien se probo aplicar el `two-stage scoring` a ambos colores. Esa variante mejoro a Blanco, pero empeoro a Negro. Por eso el compromiso final fue dejar:
+
+- `two-stage` solo para **Blanco**
+- evaluacion completa anterior para **Negro**
+
 Las mejoras mas importantes fueron:
 
 - dejar de parchar solo pesos y pasar a una busqueda de raiz mas ancha
 - agregar solver exacto para finales cerrados
 - introducir defensa especifica de corredores peligrosos cuando Blanco juega
+- usar `two-stage scoring` solo en Blanco para ahorrar presupuesto donde mas ayudaba
 
 ## Fortalezas observadas
 
@@ -282,6 +297,7 @@ Las mejoras mas importantes fueron:
 - como Negro, muestra una columna vertebral muy fuerte
 - los finales cerrados en `classic` son mucho mas estables por el solver exacto
 - Blanco ya reconoce mejor cuando debe cortar un corredor peligroso en vez de solo seguir expandiendo
+- Blanco ahora aprovecha mejor el presupuesto de raiz gracias al filtro barato + shortlist caro
 - en `dark`, provoca muchas colisiones del rival
 - usa casi todo el presupuesto de tiempo en `classic`, pero sin forfeits
 
@@ -292,6 +308,7 @@ Las mejoras mas importantes fueron:
 - contra rivales muy pasivos, todavia puede convertir ventajas de forma mas lenta de lo ideal
 - no modela formalmente conjuntos de informacion en `dark`
 - el root search aun depende de una buena generacion inicial de candidatas
+- la mejora mas reciente de `two-stage` esta mejor validada en Blanco que en Negro, por eso no se generalizo a ambos colores
 
 La asimetria por color fue una conclusion importante de las pruebas:
 
@@ -306,6 +323,17 @@ Resultados confirmados en este workspace:
 - `dark` vs `Random`: 1/1 victoria en humo rapido
 - `classic` vs `MCTS_Tier_2`, 10 partidas: **4 victorias, 6 derrotas**
 - `dark` vs `MCTS_Tier_2`, 10 partidas: **7 victorias, 3 derrotas**
+
+En una validacion mas reciente del checkpoint final de `classic`, ya con:
+
+- solver exacto de final
+- parche de medio juego para Blanco
+- `two-stage scoring` solo para Blanco
+
+se obtuvo una mini-serie de **6 partidas** contra `MCTS_Tier_2` con resultado:
+
+- `classic` vs `MCTS_Tier_2`, 6 partidas: **4 victorias, 2 derrotas**
+- por color en esa serie: **2-1 como Negro** y **2-1 como Blanco**
 
 Si se combinan esas dos series directas contra `MCTS_Tier_2`, el resultado fue:
 
@@ -328,6 +356,7 @@ Si se siguiera iterando, las mejoras mas prometedoras serian:
 - introducir una estimacion mas rica de multiplicidad de rutas rivales
 - afinar la seleccion de cortes puros en `classic`
 - explorar una version mas fuerte del root search con mejores rollouts, pero sin volver a sobreexplorar como en las pruebas tipo UCT
+- validar con mas muestra si el `two-stage scoring` podria extenderse a Negro sin romper su rendimiento
 
 ## Restricciones respetadas
 
