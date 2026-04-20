@@ -116,6 +116,7 @@ class MalikRubenStrategy(Strategy):
                     forced,
                     my_ctx,
                     opp_ctx,
+                    last_move,
                     force_block=True,
                     opp_corridor=opp_corridor,
                     my_profile=my_profile,
@@ -136,6 +137,7 @@ class MalikRubenStrategy(Strategy):
             candidates,
             my_ctx,
             opp_ctx,
+            last_move,
             force_block=False,
             opp_corridor=opp_corridor,
             my_profile=my_profile,
@@ -287,6 +289,7 @@ class MalikRubenStrategy(Strategy):
         candidates: list[tuple[int, int]],
         my_ctx: dict,
         opp_ctx: dict,
+        last_move: tuple[int, int] | None,
         force_block: bool,
         opp_corridor: dict | None = None,
         my_profile: dict | None = None,
@@ -296,10 +299,68 @@ class MalikRubenStrategy(Strategy):
         if not candidates:
             return empty_cells(board, self._size)[0]
 
+        use_two_stage = self._player == 2
+        shortlisted: list[dict | tuple[int, int]]
+        if use_two_stage:
+            stage_entries: list[dict] = []
+            for move in candidates:
+                if self._out_of_time():
+                    break
+                stage_entries.append(
+                    self._cheap_classic_stage_entry(
+                        board,
+                        move,
+                        my_ctx,
+                        opp_ctx,
+                        last_move,
+                        force_block,
+                        opp_corridor,
+                        my_profile,
+                    )
+                )
+
+            if not stage_entries:
+                return candidates[0]
+
+            shortlisted = self._stage_b_shortlist(
+                stage_entries,
+                my_ctx,
+                opp_ctx,
+                last_move,
+                force_block,
+            )
+        else:
+            shortlisted = list(candidates)
+
         base_entries: list[dict] = []
-        for move in candidates:
+        for candidate_entry in shortlisted:
             if self._out_of_time():
                 break
+            if use_two_stage:
+                stage_entry = candidate_entry
+                move = stage_entry["move"]
+                own_adj = stage_entry["own_adj"]
+                own_merge = stage_entry["own_merge"]
+                dual_bonus = stage_entry["dual_bonus"]
+                cut_gain = stage_entry["cut_gain"]
+                pure_cut = stage_entry["pure_cut"]
+                white_mid_bonus = stage_entry["white_mid_bonus"]
+                span_extend = stage_entry["span_extend"]
+                overcommit = stage_entry["overcommit"]
+            else:
+                move = candidate_entry
+                own_adj = self._count_adjacent(board, move, self._player)
+                own_merge = self._group_merge_potential(board, move, self._player)
+                dual_bonus = self._dual_purpose_bonus(board, move, my_ctx, opp_ctx)
+                cut_gain = self._block_distance_delta(board, move, self._opponent, opp_ctx["best"])
+                pure_cut = self._pure_cut_score(board, move, opp_ctx, cut_gain)
+                white_mid_bonus = 0.0
+                span_extend = (
+                    self._objective_span_extension_from_profile(my_profile, move, self._player)
+                    if my_profile is not None
+                    else 0.0
+                )
+                overcommit = self._white_overcommit_pressure(my_profile) if my_profile is not None else 0.0
             trial = self._with_move(board, move, self._player)
             if check_winner(trial, self._size) == self._player:
                 return move
@@ -311,12 +372,7 @@ class MalikRubenStrategy(Strategy):
             build_delta = my_ctx["best"] - after_my["best"]
             block_reduction = opp_ctx["mass"] - after_opp["mass"]
             build_reduction = after_my["mass"] - my_ctx["mass"]
-            own_adj = self._count_adjacent(board, move, self._player)
-            own_merge = self._group_merge_potential(board, move, self._player)
-            dual_bonus = self._dual_purpose_bonus(board, move, my_ctx, opp_ctx)
             reply_value, reply_pressure = self._opponent_reply_signal(trial, move)
-            cut_gain = self._block_distance_delta(board, move, self._opponent, opp_ctx["best"])
-            pure_cut = self._pure_cut_score(board, move, opp_ctx, cut_gain)
             score = self._position_score(trial, after_my, after_opp)
             if force_block:
                 score += 18.0 * block_delta + 1.7 * block_reduction + 4.0 * build_delta + 3.5 * dual_bonus
@@ -325,26 +381,25 @@ class MalikRubenStrategy(Strategy):
                 score += 10.0 * block_delta + 5.0 * build_delta + 1.2 * block_reduction + 0.8 * build_reduction + 2.2 * dual_bonus
                 score += 2.0 * cut_gain + 10.0 * (reply_value - 0.5) - 2.4 * reply_pressure
             if self._player == 2 and opp_corridor is not None:
-                white_mid_bonus = self._white_midgame_bonus(
-                    move,
-                    opp_corridor,
-                    opp_ctx["critical"].get(move, 0.0),
-                    self._count_adjacent(board, move, self._opponent),
-                    self._group_merge_potential(board, move, self._opponent),
-                    pure_cut,
-                )
+                if not use_two_stage:
+                    white_mid_bonus = self._white_midgame_bonus(
+                        move,
+                        opp_corridor,
+                        opp_ctx["critical"].get(move, 0.0),
+                        self._count_adjacent(board, move, self._opponent),
+                        self._group_merge_potential(board, move, self._opponent),
+                        pure_cut,
+                    )
                 score += 1.15 * white_mid_bonus
                 after_corridor = self._narrow_corridor_pressure(trial, self._opponent)
                 score += 0.95 * max(0.0, opp_corridor["threat"] - after_corridor["threat"])
                 if my_profile is not None:
-                    span_extend = self._objective_span_extension_from_profile(my_profile, move, self._player)
                     if span_extend > 0.0:
                         score += 1.0 * span_extend
-                    overcommit = self._white_overcommit_pressure(my_profile)
                     if (
                         overcommit > 0.0
                         and span_extend <= 0.0
-                        and self._group_merge_potential(board, move, self._player) == 0
+                        and own_merge == 0
                         and cut_gain == 0
                         and white_mid_bonus < 1.0
                     ):
@@ -355,7 +410,6 @@ class MalikRubenStrategy(Strategy):
                 connected_progress_gain = 0.0
                 if own_adj > 0 or own_merge > 0 or build_delta > 0:
                     connected_progress_gain = max(0.0, raw_progress_gain)
-                span_extend = self._objective_span_extension_from_profile(my_profile, move, self._player)
                 connected_span_extend = max(0.0, span_extend) if (own_adj > 0 or own_merge > 0 or build_delta > 0) else 0.0
                 conversion_bonus = (
                     3.2 * max(0.0, build_delta)
@@ -387,7 +441,9 @@ class MalikRubenStrategy(Strategy):
             )
 
         if not base_entries:
-            return candidates[0]
+            if use_two_stage:
+                return shortlisted[0]["move"]
+            return shortlisted[0]
 
         base_entries.sort(key=lambda entry: entry["base"], reverse=True)
         width = 24 if self._time_left() > max(2.2, self._time_limit * 0.18) else 18
@@ -396,6 +452,187 @@ class MalikRubenStrategy(Strategy):
             return finalists[0]["move"]
 
         return self._flat_root_search(finalists, force_block)
+
+    def _cheap_classic_stage_entry(
+        self,
+        board: tuple[tuple[int, ...], ...],
+        move: tuple[int, int],
+        my_ctx: dict,
+        opp_ctx: dict,
+        last_move: tuple[int, int] | None,
+        force_block: bool,
+        opp_corridor: dict | None = None,
+        my_profile: dict | None = None,
+    ) -> dict:
+        own_adj = self._count_adjacent(board, move, self._player)
+        opp_adj = self._count_adjacent(board, move, self._opponent)
+        own_merge = self._group_merge_potential(board, move, self._player)
+        opp_merge = self._group_merge_potential(board, move, self._opponent)
+        my_critical = my_ctx["critical"].get(move, 0.0)
+        opp_critical = opp_ctx["critical"].get(move, 0.0)
+        cut_gain = self._block_distance_delta(board, move, self._opponent, opp_ctx["best"])
+        pure_cut = self._pure_cut_score(board, move, opp_ctx, cut_gain)
+        dual_bonus = 0.9 * own_adj + 1.4 * own_merge + 0.7 * my_critical + 0.5 * opp_critical
+        bridge_bonus = self._bridge_move_bonus(board, move, self._player)
+        axis_bonus = self._axis_alignment(move, self._player)
+        goal_bonus = self._goal_edge_bonus(move, self._player)
+        near_goal_bonus = self._near_goal_edge_bonus(move, self._player)
+        contact = (
+            1.3 * min(1, own_adj)
+            + 1.5 * min(1, opp_adj)
+            + 0.75 * own_merge
+            + 0.45 * opp_merge
+        )
+        span_extend = (
+            self._objective_span_extension_from_profile(my_profile, move, self._player)
+            if my_profile is not None
+            else 0.0
+        )
+        white_mid_bonus = 0.0
+        overcommit = 0.0
+
+        if force_block:
+            stage_score = (
+                2.7 * opp_critical
+                + 2.2 * pure_cut
+                + 1.7 * cut_gain
+                + 1.25 * opp_adj
+                + 0.8 * opp_merge
+                + 1.1 * dual_bonus
+                + 0.7 * own_adj
+                + 0.45 * own_merge
+                + 0.35 * bridge_bonus
+            )
+        else:
+            stage_score = (
+                1.9 * my_critical
+                + 1.55 * opp_critical
+                + 1.25 * own_adj
+                + 1.2 * own_merge
+                + 0.9 * opp_adj
+                + 0.55 * opp_merge
+                + 1.15 * dual_bonus
+                + 0.95 * contact
+                + 0.75 * pure_cut
+                + 0.45 * cut_gain
+                + 0.5 * bridge_bonus
+                + 0.25 * axis_bonus
+                + 0.3 * goal_bonus
+                + 0.15 * near_goal_bonus
+            )
+
+        if self._player == 2 and opp_corridor is not None:
+            white_mid_bonus = self._white_midgame_bonus(
+                move,
+                opp_corridor,
+                opp_critical,
+                opp_adj,
+                opp_merge,
+                pure_cut,
+            )
+            stage_score += white_mid_bonus
+            if span_extend > 0.0:
+                stage_score += 0.7 * span_extend
+            if my_profile is not None:
+                overcommit = self._white_overcommit_pressure(my_profile)
+                if overcommit > 0.0 and span_extend <= 0.0 and own_merge == 0 and pure_cut <= 0.0 and white_mid_bonus < 1.0:
+                    stage_score -= 0.8 * overcommit
+
+        if own_adj == 0 and my_critical < 1.0 and opp_ctx["best"] > 5:
+            stage_score -= 2.0
+        if last_move is not None and move in get_neighbors(last_move[0], last_move[1], self._size):
+            stage_score += 0.75
+
+        return {
+            "move": move,
+            "stage": stage_score,
+            "own_adj": own_adj,
+            "opp_adj": opp_adj,
+            "own_merge": own_merge,
+            "opp_merge": opp_merge,
+            "my_critical": my_critical,
+            "opp_critical": opp_critical,
+            "cut_gain": cut_gain,
+            "pure_cut": pure_cut,
+            "dual_bonus": dual_bonus,
+            "white_mid_bonus": white_mid_bonus,
+            "span_extend": span_extend,
+            "overcommit": overcommit,
+        }
+
+    def _stage_b_shortlist(
+        self,
+        stage_entries: list[dict],
+        my_ctx: dict,
+        opp_ctx: dict,
+        last_move: tuple[int, int] | None,
+        force_block: bool,
+    ) -> list[dict]:
+        if not stage_entries:
+            return []
+
+        ordered = sorted(stage_entries, key=lambda entry: entry["stage"], reverse=True)
+        time_left = self._time_left()
+        if force_block:
+            base_width = 14 if time_left > max(2.2, self._time_limit * 0.15) else 12
+            cap = min(len(ordered), base_width + 6)
+        else:
+            if time_left > max(2.4, self._time_limit * 0.16):
+                base_width = 12
+            elif time_left > max(1.3, self._time_limit * 0.09):
+                base_width = 10
+            else:
+                base_width = 8
+            cap = min(len(ordered), base_width + 6)
+
+        if len(ordered) <= cap:
+            return ordered
+
+        entry_by_move = {entry["move"]: entry for entry in ordered}
+        locked: set[tuple[int, int]] = set()
+
+        for move, _ in opp_ctx["top"][: 6 if force_block else 4]:
+            if move in entry_by_move:
+                locked.add(move)
+        for move, _ in my_ctx["top"][:4]:
+            if move in entry_by_move:
+                locked.add(move)
+        for entry in sorted(ordered, key=lambda item: item["pure_cut"], reverse=True)[: 5 if force_block else 4]:
+            locked.add(entry["move"])
+        for entry in sorted(
+            ordered,
+            key=lambda item: item["opp_critical"] + 0.8 * item["cut_gain"],
+            reverse=True,
+        )[:4]:
+            locked.add(entry["move"])
+        for entry in sorted(
+            ordered,
+            key=lambda item: item["my_critical"] + 0.9 * item["own_merge"] + 0.45 * item["own_adj"],
+            reverse=True,
+        )[:4]:
+            locked.add(entry["move"])
+
+        if last_move is not None:
+            neighbor_set = set(get_neighbors(last_move[0], last_move[1], self._size))
+            neighbor_entries = [entry for entry in ordered if entry["move"] in neighbor_set]
+            for entry in neighbor_entries[:4]:
+                locked.add(entry["move"])
+
+        shortlist: list[dict] = []
+        seen: set[tuple[int, int]] = set()
+        for entry in sorted((entry_by_move[move] for move in locked), key=lambda item: item["stage"], reverse=True):
+            shortlist.append(entry)
+            seen.add(entry["move"])
+
+        for entry in ordered:
+            if entry["move"] in seen:
+                continue
+            shortlist.append(entry)
+            seen.add(entry["move"])
+            if len(shortlist) >= cap:
+                break
+
+        return shortlist
 
     def _maybe_solve_endgame(
         self,
@@ -1574,4 +1811,3 @@ class MalikRubenStrategy(Strategy):
 
     def _out_of_time(self) -> bool:
         return time.monotonic() >= self._deadline
-
